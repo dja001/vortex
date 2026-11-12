@@ -245,6 +245,8 @@ files = paper.tex references.bib
 context = workflow writing latex
 # extra arguments for claude, e.g. --model opus
 claude_args =
+# Claude Code permission mode for batches (auto, acceptEdits, manual, ...)
+permission_mode = auto
 # regenerate figures when Claude changes figure_inputs (empty: no figures)
 figures = make figures
 figure_inputs = code
@@ -252,8 +254,10 @@ figure_inputs = code
 
 ## What Claude is allowed to do
 
-Each batch runs Claude Code with `--permission-mode acceptEdits` inside its
-worktree, plus a generated settings file that:
+Each batch runs Claude Code inside its worktree in **auto** permission mode,
+where a classifier approves routine actions and blocks risky ones. Set
+`permission_mode` in `.vortex/config` to change it (e.g. `acceptEdits` to be
+asked before most shell commands). A generated settings file also:
 
 - **allows without asking:** `vortex check`, `vortex submit`, read-only git
   commands, `git add`, `grep`, web search, and fetching from `doi.org` and
@@ -261,8 +265,8 @@ worktree, plus a generated settings file that:
 - **denies:** editing your copy of the `.tex`/`.bib` files and the context
   modules.
 
-Anything else (other shell commands, other websites) asks for your approval in
-the Claude pane.
+In auto mode, anything else is left to the classifier. In other modes, it asks
+for your approval in the Claude pane.
 
 ## Repository layout
 

@@ -58,6 +58,9 @@ files = {files}
 context = workflow writing latex
 # extra arguments for the claude command, e.g. --model opus
 claude_args =
+# Claude Code permission mode for batches: auto (a classifier approves safe
+# actions), acceptEdits (asks before most shell commands), manual, ...
+permission_mode = auto
 # command that regenerates the figures, run by `vortex check` in the document
 # directory only when Claude has changed something in figure_inputs;
 # leave empty if there are no generated figures
@@ -147,6 +150,8 @@ class Project:
         self.files = sect.get('files', self.main).split()
         self.context = sect.get('context', 'workflow').split()
         self.claude_args = shlex.split(sect.get('claude_args', ''))
+        self.permission_mode = sect.get('permission_mode', '').strip() \
+            or 'auto'
         self.figures = sect.get('figures', '').strip()
         self.figure_inputs = sect.get('figure_inputs', '').split()
         top = git('rev-parse', '--show-toplevel', cwd=self.docdir)
@@ -303,7 +308,7 @@ class Project:
         settings = {
             'autoMemoryEnabled': False,
             'permissions': {
-                'defaultMode': 'acceptEdits',
+                'defaultMode': self.permission_mode,
                 'additionalDirectories': [str(self.tmp)],
                 'allow': [
                     'Bash(vortex check)', 'Bash(vortex check:*)',
@@ -536,7 +541,7 @@ def cmd_batch(args):
               'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1',
               'claude', '--append-system-prompt-file', str(prompt),
               '--settings', str(settings), '--permission-mode',
-              'acceptEdits', '-n', f'vortex batch {n}', *p.claude_args,
+              p.permission_mode, '-n', f'vortex batch {n}', *p.claude_args,
               f"Batch {n}: address the {len(tags)} %CLAUDE comment(s) "
               "listed in your system prompt, following the vortex workflow."]
     banner = (f"printf '\\033[1mvortex batch {n}\\033[0m  context: "
