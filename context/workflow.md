@@ -43,7 +43,8 @@ only through `vortex submit`.
 
 - Never edit the user's copy (the directory given under Batch facts).
 - Put temporary files only in the scratch directory given under Batch facts,
-  never in /tmp or the home directory: the home quota is strict.
+  never in /tmp or the home directory: vortex keeps everything inside the
+  project.
 - Before modifying any file that is not .tex or .bib, read the coding
   preferences file given under Batch facts.
 - Keep the existing line breaks. Don't rewrap lines you didn't change: each
