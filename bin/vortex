@@ -1,0 +1,789 @@
+#!/usr/bin/env python3
+"""vortex: co-write a LaTeX document with Claude Code from vim.
+
+The user edits their copy in vim while latexmk -pvc keeps the PDF up to date.
+A batch sends the %CLAUDE comments to Claude, which works in a private git
+worktree under .vortex/. `vortex submit` merges Claude's commit with the
+user's latest edits and fast-forwards the user's branch; vim then reloads.
+
+Everything vortex writes lives in <docdir>/.vortex/ (ignored by git except
+config and project.md). Nothing is written to the home directory.
+"""
+
+import argparse
+import configparser
+import difflib
+import hashlib
+import json
+import os
+import re
+import shlex
+import shutil
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+TOOL_DIR = Path(__file__).resolve().parent.parent
+VORTEX_BIN = TOOL_DIR / 'bin' / 'vortex'
+CONTEXT_DIR = TOOL_DIR / 'context'
+VIM_PLUGIN = TOOL_DIR / 'vim' / 'vortex.vim'
+TMUX_CONF = TOOL_DIR / 'tmux' / 'vortex.conf'
+TMUX_SOCKET = 'vortex'
+
+TAG_RE = re.compile(r'%\s*CLAUDE\b(?!-Q)')
+CONFLICT_RE = re.compile(r'^(<<<<<<<|>>>>>>>)( |$)', re.M)
+CLAUDE_AUTHOR = {'GIT_AUTHOR_NAME': 'Claude (vortex)',
+                 'GIT_AUTHOR_EMAIL': 'noreply@anthropic.com'}
+BUSY = ('working', 'conflict')
+
+VORTEX_GITIGNORE = """\
+# vortex: everything here is local state except the config and project notes
+*
+!.gitignore
+!config
+!project.md
+"""
+
+DEFAULT_CONFIG = """\
+[vortex]
+# main LaTeX file (relative to this document directory)
+main = {main}
+# files that make up the document: snapshotted, merged and scanned for %CLAUDE tags
+files = {files}
+# context modules loaded for every batch, from {context_dir}/<name>.md
+# (project.md in this folder is always appended when it exists)
+context = workflow writing latex
+# extra arguments for the claude command, e.g. --model opus
+claude_args =
+# command that regenerates the figures, run by `vortex check` in the document
+# directory only when Claude has changed something in figure_inputs;
+# leave empty if there are no generated figures
+figures =
+# directories whose content the figures depend on
+figure_inputs =
+"""
+
+DEFAULT_PROJECT_MD = """\
+# Project notes for {main}
+
+Read by Claude at the start of every batch, so it does not need to re-read
+and re-interpret the whole document each time. Keep it short and factual.
+
+## What the document is
+(purpose, audience, status)
+
+## Structure
+(sections and what each one does)
+
+## Notation and conventions
+(symbols, units, macros, terminology to keep consistent)
+
+## Settled decisions
+(choices already made in earlier batches that should not be revisited)
+"""
+
+
+class VortexError(Exception):
+    pass
+
+
+class Conflict(Exception):
+    pass
+
+
+def run(cmd, cwd=None, check=True, env=None):
+    full_env = None
+    if env:
+        full_env = dict(os.environ)
+        full_env.update(env)
+    r = subprocess.run(cmd, cwd=cwd, env=full_env, text=True,
+                       capture_output=True)
+    if check and r.returncode:
+        raise VortexError(f"command failed: {shlex.join(map(str, cmd))}\n"
+                          f"{r.stdout}{r.stderr}".rstrip())
+    return r
+
+
+def git(*args, cwd, check=True, env=None):
+    return run(['git', *map(str, args)], cwd=cwd, check=check,
+               env=env).stdout.strip()
+
+
+def tmux(*args, check=True):
+    cmd = ['tmux', '-L', TMUX_SOCKET, '-f', str(TMUX_CONF), *map(str, args)]
+    return run(cmd, check=check).stdout.strip()
+
+
+def tmux_has(target):
+    return run(['tmux', '-L', TMUX_SOCKET, 'display-message', '-p', '-t',
+                target, '#{pane_id}'], check=False).returncode == 0
+
+
+def write_atomic(path, text):
+    tmp = path.with_name(path.name + '.tmp')
+    tmp.write_text(text)
+    os.replace(tmp, path)
+
+
+class Project:
+
+    def __init__(self, docdir):
+        self.docdir = Path(docdir).resolve()
+        self.vdir = self.docdir / '.vortex'
+        self.state_dir = self.vdir / 'state'
+        self.wt = self.vdir / 'worktree'
+        self.build = self.vdir / 'build'
+        self.tmp = self.vdir / 'tmp'
+        if not (self.vdir / 'config').exists():
+            raise VortexError(f"no vortex project in {self.docdir} "
+                              "(run: vortex init file.tex)")
+        cfg = configparser.ConfigParser()
+        cfg.read(self.vdir / 'config')
+        sect = cfg['vortex']
+        self.main = sect.get('main')
+        self.files = sect.get('files', self.main).split()
+        self.context = sect.get('context', 'workflow').split()
+        self.claude_args = shlex.split(sect.get('claude_args', ''))
+        self.figures = sect.get('figures', '').strip()
+        self.figure_inputs = sect.get('figure_inputs', '').split()
+        top = git('rev-parse', '--show-toplevel', cwd=self.docdir)
+        self.repo = Path(top).resolve()
+        self.rel = self.docdir.relative_to(self.repo)
+        self.wt_docdir = self.wt / self.rel
+
+    # ---------- state ----------
+    @property
+    def state_file(self):
+        return self.state_dir / 'state.json'
+
+    def state(self):
+        try:
+            return json.loads(self.state_file.read_text())
+        except (FileNotFoundError, json.JSONDecodeError):
+            return {'batch': 0, 'status': 'idle'}
+
+    def save_state(self, st):
+        self.state_dir.mkdir(parents=True, exist_ok=True)
+        write_atomic(self.state_file, json.dumps(st, indent=1))
+
+    # ---------- files ----------
+    def repo_paths(self):
+        """Document files relative to the repository root."""
+        return [str(self.rel / f) for f in self.files
+                if (self.docdir / f).exists()]
+
+    def tags(self, root):
+        """List the %CLAUDE comments under root (docdir or worktree docdir)."""
+        found = []
+        for f in self.files:
+            path = root / f
+            if not path.exists():
+                continue
+            for i, line in enumerate(path.read_text().splitlines(), 1):
+                if TAG_RE.search(line):
+                    found.append((f, i, line.strip()))
+        return found
+
+    # ---------- git ----------
+    def branch(self):
+        b = git('symbolic-ref', '--short', '-q', 'HEAD', cwd=self.repo,
+                check=False)
+        if not b:
+            raise VortexError("the repository is on a detached HEAD; "
+                              "check out a branch first")
+        return b
+
+    def snapshot(self, message, batch):
+        """Commit the user's document files (only those) if they changed."""
+        paths = self.repo_paths()
+        git('add', '--', *paths, cwd=self.repo)
+        staged = run(['git', 'diff', '--cached', '--quiet', 'HEAD', '--',
+                      *paths], cwd=self.repo, check=False)
+        if staged.returncode:
+            git('commit', '-q', '-m', f"{message}\n\nVortex-Batch: {batch}",
+                '--', *paths, cwd=self.repo)
+        return git('rev-parse', 'HEAD', cwd=self.repo)
+
+    def merge_in_progress(self):
+        return run(['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'],
+                   cwd=self.wt, check=False).returncode == 0
+
+    def reset_worktree(self, base):
+        if (self.wt / '.git').exists():
+            if self.merge_in_progress():
+                git('merge', '--abort', cwd=self.wt, check=False)
+            git('checkout', '-q', '-f', '-B', 'vortex/claude', base,
+                cwd=self.wt)
+            git('clean', '-fdq', cwd=self.wt)
+        else:
+            git('worktree', 'prune', cwd=self.repo)
+            git('worktree', 'add', '-q', '-f', '-B', 'vortex/claude',
+                self.wt, base, cwd=self.repo)
+
+    # ---------- claude ----------
+    def write_prompt(self, batch, tags):
+        loaded = []
+        parts = []
+        for name in self.context:
+            path = CONTEXT_DIR / f'{name}.md'
+            if path.exists():
+                loaded.append(str(path))
+                parts.append(f"<!-- context module: {path} -->\n"
+                             f"{path.read_text().strip()}\n")
+            else:
+                print(f"vortex: warning: context module {path} not found",
+                      file=sys.stderr)
+        project_md = self.vdir / 'project.md'
+        if project_md.exists():
+            loaded.append(str(project_md))
+            parts.append(f"<!-- project notes: {project_md} -->\n"
+                         f"{project_md.read_text().strip()}\n")
+
+        tag_lines = '\n'.join(f"- {f}:{i}: {text}" for f, i, text in tags)
+        files = ', '.join(self.files)
+        facts = f"""# vortex batch {batch}
+
+## Batch facts
+- Your working directory is a private git worktree: {self.wt}
+- The document is {self.wt_docdir / self.main} (files: {files}, in {self.wt_docdir}).
+- The user's own copy is in {self.docdir}. Never edit it.
+- Scratch directory for any temporary file: {self.tmp}
+- Coding preferences (read before modifying code): {CONTEXT_DIR / 'coding.md'}
+- Commands: `vortex check` (regenerate figures if needed, compile your copy), `vortex submit -m "<summary>"` (deliver).
+- Figures: {('regenerated by `vortex check` with `' + self.figures + '` when you change anything in ' + ', '.join(self.figure_inputs)) if self.figures else 'not generated (no figures command configured)'}.
+- The %CLAUDE comments in this batch:
+{tag_lines}
+"""
+        text = facts + '\n' + '\n'.join(parts)
+        path = self.state_dir / 'prompt.md'
+        write_atomic(path, text)
+        return path, loaded
+
+    def write_settings(self):
+        ctx = f"/{CONTEXT_DIR}/**"
+        settings = {
+            'autoMemoryEnabled': False,
+            'permissions': {
+                'defaultMode': 'acceptEdits',
+                'additionalDirectories': [str(self.tmp)],
+                'allow': [
+                    'Bash(vortex check)', 'Bash(vortex check:*)',
+                    'Bash(vortex submit)', 'Bash(vortex submit:*)',
+                    'Bash(vortex status)',
+                    'Bash(git status:*)', 'Bash(git diff:*)',
+                    'Bash(git log:*)', 'Bash(git show:*)',
+                    'Bash(git add:*)',
+                    'Bash(grep:*)', 'Bash(sed -n:*)', 'Bash(wc:*)',
+                    f'Read({ctx})', f'Read(/{self.build}/**)',
+                ],
+                'deny': [
+                    f'Edit(/{self.docdir}/*.tex)',
+                    f'Edit(/{self.docdir}/*.bib)',
+                    f'Edit({ctx})',
+                ],
+            },
+        }
+        path = self.state_dir / 'claude-settings.json'
+        write_atomic(path, json.dumps(settings, indent=1))
+        return path
+
+
+# ---------------------------------------------------------------- vim link
+
+class VimLink:
+    """File mailbox read by a timer in vim (vim/vortex.vim).
+
+    Vim only acts on requests while in normal mode, so the user is never
+    interrupted mid-edit.
+    """
+
+    def __init__(self, project):
+        self.dir = project.state_dir
+        self.req = self.dir / 'vim_request.json'
+        self.resp = self.dir / 'vim_response.json'
+
+    def alive(self):
+        try:
+            pid = int((self.dir / 'vim.pid').read_text())
+            os.kill(pid, 0)
+            return True
+        except (FileNotFoundError, ValueError, ProcessLookupError,
+                PermissionError):
+            return False
+
+    def request(self, op, timeout=540, **kw):
+        if not self.alive():
+            return None
+        rid = f"{op}-{time.time():.6f}"
+        self.resp.unlink(missing_ok=True)
+        write_atomic(self.req, json.dumps({'id': rid, 'op': op, **kw}))
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            time.sleep(0.1)
+            try:
+                r = json.loads(self.resp.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                if not self.alive():
+                    return None
+                continue
+            if r.get('id') == rid:
+                self.resp.unlink(missing_ok=True)
+                if not r.get('ok'):
+                    raise VortexError(f"vim refused '{op}': {r.get('error')}")
+                return r
+        self.req.unlink(missing_ok=True)
+        raise VortexError(f"vim did not answer '{op}' within {timeout}s "
+                          "(it acts only in normal mode)")
+
+
+def map_line(old, new, lnum):
+    """Line number in `new` holding the text that was at `lnum` in `old`."""
+    i = lnum - 1
+    sm = difflib.SequenceMatcher(None, old, new, autojunk=False)
+    for tag, i1, i2, j1, j2 in sm.get_opcodes():
+        if i1 <= i < i2:
+            if tag == 'equal':
+                return j1 + (i - i1) + 1
+            return j1 + min(i - i1, max(j2 - j1 - 1, 0)) + 1
+    return min(lnum, max(len(new), 1))
+
+
+# ---------------------------------------------------------------- commands
+
+def find_project(arg=None):
+    if arg:
+        p = Path(arg).resolve()
+        return Project(p.parent if p.is_file() else p)
+    env = os.environ.get('VORTEX_PROJECT')
+    if env:
+        return Project(env)
+    d = Path.cwd().resolve()
+    for cand in [d, *d.parents]:
+        if (cand / '.vortex' / 'config').exists():
+            return Project(cand)
+    raise VortexError("not in a vortex project (no .vortex/config found)")
+
+
+def cmd_init(args):
+    tex = Path(args.texfile).resolve()
+    if not tex.exists():
+        raise VortexError(f"{tex} not found")
+    docdir = tex.parent
+    git('rev-parse', '--show-toplevel', cwd=docdir)
+    vdir = docdir / '.vortex'
+    for d in (vdir, vdir / 'state', vdir / 'tmp', vdir / 'build'):
+        d.mkdir(exist_ok=True)
+    if not (vdir / '.gitignore').exists():
+        (vdir / '.gitignore').write_text(VORTEX_GITIGNORE)
+    if not (vdir / 'config').exists():
+        files = [tex.name] + sorted(p.name for p in docdir.glob('*.bib'))
+        (vdir / 'config').write_text(DEFAULT_CONFIG.format(
+            main=tex.name, files=' '.join(files), context_dir=CONTEXT_DIR))
+        print(f"vortex: created {vdir / 'config'}")
+    if not (vdir / 'project.md').exists():
+        (vdir / 'project.md').write_text(
+            DEFAULT_PROJECT_MD.format(main=tex.name))
+        print(f"vortex: created {vdir / 'project.md'} (fill it in)")
+    return Project(docdir)
+
+
+def cmd_start(args):
+    p = cmd_init(args)
+    for exe in ('tmux', 'vim', 'claude', 'latexmk'):
+        if not shutil.which(exe):
+            raise VortexError(f"{exe} not found in PATH")
+    session = 'vortex-' + re.sub(r'[^A-Za-z0-9_-]', '_', Path(p.main).stem)
+    if not tmux_has(session):
+        cols, lines = shutil.get_terminal_size((200, 60))
+        vim_cmd = shlex.join([
+            'vim', '--cmd', f"let g:vortex_dir = '{p.vdir}'",
+            '--cmd', f"let g:vortex_bin = '{VORTEX_BIN}'",
+            '-c', f"source {VIM_PLUGIN}", p.main])
+        tmux('new-session', '-d', '-s', session, '-n', 'edit', '-c',
+             p.docdir, '-x', cols, '-y', lines, vim_cmd)
+        vim_pane = tmux('display-message', '-p', '-t', f'{session}:edit',
+                        '#{pane_id}')
+        idle = shlex.join([str(VORTEX_BIN), 'idle', '--project',
+                           str(p.docdir)])
+        claude_pane = tmux('split-window', '-v', '-l', '33%', '-d', '-t',
+                           vim_pane, '-c', p.docdir, '-P', '-F',
+                           '#{pane_id}', idle)
+        latexmk = shlex.join([str(VORTEX_BIN), '_latexmk', '--project',
+                              str(p.docdir)])
+        tmux('new-window', '-d', '-t', session, '-n', 'latexmk', '-c',
+             p.docdir, latexmk)
+        st = p.state()
+        if st.get('status') in BUSY:
+            st['status'] = 'idle'   # a previous session died mid-batch
+        st.update(session=session, vim_pane=vim_pane, pane=claude_pane)
+        p.save_state(st)
+    env = dict(os.environ)
+    env.pop('TMUX', None)
+    os.execvpe('tmux', ['tmux', '-L', TMUX_SOCKET, '-f', str(TMUX_CONF),
+                        'attach-session', '-t', session], env)
+
+
+def cmd_latexmk(args):
+    p = find_project(args.project)
+    os.chdir(p.docdir)
+    cmd = ['latexmk', '-pdf', '-pvc', '-view=pdf',
+           '-interaction=nonstopmode',
+           '-e', "$pdf_previewer = q[okular --unique %S]; "
+                 "$pdf_update_method = 0;",
+           p.main]
+    print('vortex:', shlex.join(cmd), flush=True)
+    os.execvp(cmd[0], cmd)
+
+
+def claude_pane(p, st):
+    """Return the id of the bottom pane, recreating it if it was closed."""
+    pane = st.get('pane')
+    if pane and tmux_has(pane):
+        return pane
+    vim_pane = st.get('vim_pane')
+    if not (vim_pane and tmux_has(vim_pane)):
+        raise VortexError("vortex tmux session not found (use vortex start)")
+    return tmux('split-window', '-v', '-l', '33%', '-d', '-t', vim_pane,
+                '-c', p.docdir, '-P', '-F', '#{pane_id}', 'true')
+
+
+def respawn_idle(p, st):
+    pane = st.get('pane')
+    if pane and tmux_has(pane):
+        idle = shlex.join([str(VORTEX_BIN), 'idle', '--project',
+                           str(p.docdir)])
+        tmux('respawn-pane', '-k', '-t', pane, '-c', p.docdir, idle,
+             check=False)
+
+
+def cmd_batch(args):
+    p = find_project(args.project)
+    st = p.state()
+    if st.get('status') in BUSY:
+        raise VortexError(f"batch {st['batch']} is still {st['status']} "
+                          "(:VortexAbort cancels it)")
+    branch = p.branch()
+    tags = p.tags(p.docdir)
+    if not tags:
+        raise VortexError("no %CLAUDE comments in the document")
+    n = st.get('batch', 0) + 1
+    base = p.snapshot(f"vortex: snapshot before batch {n}", n)
+    p.reset_worktree(base)
+    p.tmp.mkdir(parents=True, exist_ok=True)
+    p.build.mkdir(parents=True, exist_ok=True)
+    prompt, loaded = p.write_prompt(n, tags)
+    settings = p.write_settings()
+    pane = claude_pane(p, st)
+    st.update(batch=n, status='working', base=base, branch=branch,
+              pane=pane, started=time.time(), context=loaded)
+    p.save_state(st)
+
+    path_env = f"{VORTEX_BIN.parent}:{os.environ.get('PATH', '')}"
+    claude = ['env', f'PATH={path_env}', f'VORTEX_PROJECT={p.docdir}',
+              'CLAUDE_CODE_DISABLE_AUTO_MEMORY=1',
+              'claude', '--append-system-prompt-file', str(prompt),
+              '--settings', str(settings), '--permission-mode',
+              'acceptEdits', '-n', f'vortex batch {n}', *p.claude_args,
+              f"Batch {n}: address the {len(tags)} %CLAUDE comment(s) "
+              "listed in your system prompt, following the vortex workflow."]
+    banner = (f"printf '\\033[1mvortex batch {n}\\033[0m  context: "
+              f"{' '.join(Path(x).name for x in loaded)}\\n'")
+    idle = shlex.join([str(VORTEX_BIN), 'idle', '--project', str(p.docdir)])
+    tmux('respawn-pane', '-k', '-t', pane, '-c', p.wt,
+         f"{banner}; {shlex.join(claude)}; exec {idle}")
+    print(f"vortex: batch {n} sent ({len(tags)} comment(s))")
+
+
+def inputs_signature(p, src):
+    h = hashlib.sha1()
+    for d in p.figure_inputs:
+        for f in sorted((src / d).rglob('*')):
+            if f.is_file() and '__pycache__' not in f.parts:
+                h.update(str(f.relative_to(src)).encode())
+                h.update(f.read_bytes())
+    return h.hexdigest()
+
+
+def figure_code_touched(p, src):
+    """True if Claude changed (or added) anything in figure_inputs."""
+    base = p.state().get('base')
+    paths = [str(src / d) for d in p.figure_inputs]
+    if not base or not paths:
+        return False
+    if run(['git', 'diff', '--quiet', base, '--', *paths], cwd=src,
+           check=False).returncode:
+        return True
+    return bool(git('ls-files', '--others', '--exclude-standard', '--',
+                    *paths, cwd=src))
+
+
+def regenerate_figures(p, src, force):
+    if not force and not figure_code_touched(p, src):
+        print("vortex check: figure code untouched, figures not regenerated")
+        return 0
+    key = f"{p.state().get('batch')}:{inputs_signature(p, src)}"
+    if not force and p.state().get('figures_done') == key:
+        print("vortex check: figures already regenerated for this code")
+        return 0
+    print(f"vortex check: regenerating figures: {p.figures}", flush=True)
+    t0 = time.time()
+    # fixed timestamp so that unchanged figures come out byte-identical
+    r = run(['bash', '-c', p.figures], cwd=src, check=False,
+            env={'SOURCE_DATE_EPOCH': '946684800'})
+    if r.returncode:
+        print("vortex check: figure generation FAILED")
+        print(r.stdout[-3000:], r.stderr[-3000:])
+        return 1
+    st = p.state()
+    st['figures_done'] = key
+    p.save_state(st)
+    print(f"vortex check: figures regenerated in {time.time() - t0:.0f}s")
+    return 0
+
+
+def cmd_check(args):
+    p = find_project(args.project)
+    src = p.wt_docdir if p.wt_docdir.exists() else p.docdir
+    p.build.mkdir(parents=True, exist_ok=True)
+    if p.figures and not args.no_figures and src == p.wt_docdir:
+        rc = regenerate_figures(p, src, args.figures)
+        if rc:
+            return rc
+    r = run(['latexmk', '-pdf', '-interaction=nonstopmode',
+             '-halt-on-error', f'-outdir={p.build}', p.main], cwd=src,
+            check=False)
+    log = p.build / (Path(p.main).stem + '.log')
+    if r.returncode == 0:
+        warnings = 0
+        if log.exists():
+            warnings = sum('Warning' in line
+                           for line in log.read_text(errors='replace')
+                           .splitlines())
+        print(f"vortex check: OK ({warnings} warning lines in {log})")
+        return 0
+    print("vortex check: FAILED")
+    if log.exists():
+        lines = log.read_text(errors='replace').splitlines()
+        for i, line in enumerate(lines):
+            if line.startswith('!'):
+                print('\n'.join(lines[i:i + 6]))
+                print('...')
+    else:
+        print(r.stdout[-3000:], r.stderr[-2000:])
+    return 1
+
+
+def commit_claude_work(p, st, message):
+    """Commit Claude's edits (or a resolved merge) in the worktree."""
+    env = CLAUDE_AUTHOR
+    if p.merge_in_progress():
+        unresolved = []
+        for f in git('diff', '--name-only', 'HEAD', cwd=p.wt).splitlines():
+            path = p.wt / f
+            if path.exists() and CONFLICT_RE.search(
+                    path.read_text(errors='replace')):
+                unresolved.append(f)
+        if unresolved:
+            raise VortexError("conflict markers remain in: "
+                              + ', '.join(unresolved))
+        git('add', '-A', cwd=p.wt)
+        git('commit', '-q', '--no-edit', cwd=p.wt, env=env)
+        return
+    git('add', '-A', cwd=p.wt)
+    if run(['git', 'diff', '--cached', '--quiet'], cwd=p.wt,
+           check=False).returncode:
+        msg = message or f"vortex: batch {st['batch']} edits"
+        git('commit', '-q', '-m', f"{msg}\n\nVortex-Batch: {st['batch']}",
+            cwd=p.wt, env=env)
+
+
+def merge_user(p, st, user_commit):
+    if run(['git', 'merge-base', '--is-ancestor', user_commit, 'HEAD'],
+           cwd=p.wt, check=False).returncode == 0:
+        return
+    r = run(['git', '-c', 'merge.conflictStyle=diff3', 'merge', '--no-ff',
+             '-m', f"vortex: merge batch {st['batch']}\n\n"
+                   f"Vortex-Batch: {st['batch']}", user_commit],
+            cwd=p.wt, check=False, env=CLAUDE_AUTHOR)
+    if r.returncode:
+        files = git('diff', '--name-only', '--diff-filter=U',
+                    cwd=p.wt).splitlines()
+        if not files:
+            raise VortexError(f"merge failed:\n{r.stdout}{r.stderr}")
+        raise Conflict(files)
+
+
+def cmd_submit(args):
+    p = find_project(args.project)
+    st = p.state()
+    if st.get('status') not in BUSY:
+        raise VortexError(f"no batch in progress (status: {st.get('status')})")
+    if p.branch() != st['branch']:
+        raise VortexError(f"the user switched from branch {st['branch']} to "
+                          f"{p.branch()}; ask them what to do")
+    commit_claude_work(p, st, args.message)
+
+    vim = VimLink(p)
+    locked = vim.request('lock')
+    try:
+        user = p.snapshot(f"vortex: your edits during batch {st['batch']}",
+                          st['batch'])
+        merge_user(p, st, user)
+        old = {f: (p.docdir / f).read_text().splitlines()
+               for f in p.files if (p.docdir / f).exists()}
+        r = run(['git', 'merge', '-q', '--ff-only', 'vortex/claude'],
+                cwd=p.repo, check=False)
+        if r.returncode:
+            raise VortexError("could not fast-forward the user's branch:\n"
+                              f"{r.stdout}{r.stderr}")
+    except Conflict as c:
+        if locked:
+            vim.request('unlock', timeout=30)
+        st['status'] = 'conflict'
+        p.save_state(st)
+        print("vortex submit: CONFLICT with edits the user made meanwhile, "
+              "in: " + ', '.join(c.args[0]))
+        print("Markers use diff3 style: <<<<<<< HEAD = your version, "
+              "||||||| = common ancestor, >>>>>>> = the user's version.")
+        print("Resolve them (ask the user if your change contradicts "
+              "theirs), then run `vortex submit` again.")
+        return 2
+    except BaseException:
+        if locked:
+            vim.request('unlock', timeout=30)
+        raise
+
+    changed, cursor = [], {}
+    for f, old_lines in old.items():
+        new_lines = (p.docdir / f).read_text().splitlines()
+        if new_lines != old_lines:
+            changed.append(str(p.docdir / f))
+            if locked and Path(locked.get('file', '')) == p.docdir / f:
+                lnum = map_line(old_lines, new_lines, locked['lnum'])
+                top = max(1, locked['topline'] + lnum - locked['lnum'])
+                cursor = {'lnum': lnum, 'topline': top}
+    if locked:
+        vim.request('reload', timeout=30, changed=changed, **cursor)
+    head = git('rev-parse', '--short', 'HEAD', cwd=p.repo)
+    st.update(status='idle', last_applied=head, applied_at=time.time())
+    p.save_state(st)
+    stat = git('diff', '--stat', st['base'], 'HEAD', '--',
+               *p.repo_paths(), cwd=p.repo)
+    left = p.tags(p.docdir)
+    print(f"vortex submit: Applied batch {st['batch']} as {head}.")
+    print(stat)
+    if left:
+        print(f"{len(left)} %CLAUDE comment(s) remain in the user's copy "
+              "(possibly new ones; they go in the next batch).")
+    if not locked:
+        print("(vim was not running; nothing to reload)")
+    return 0
+
+
+def cmd_abort(args):
+    p = find_project(args.project)
+    st = p.state()
+    if (p.wt / '.git').exists() and p.merge_in_progress():
+        git('merge', '--abort', cwd=p.wt, check=False)
+    was = st.get('status')
+    st['status'] = 'idle'
+    p.save_state(st)
+    respawn_idle(p, st)
+    print(f"vortex: batch {st.get('batch')} aborted (was {was}); "
+          "Claude's work stays on branch vortex/claude until the next batch")
+
+
+def ago(t):
+    s = int(time.time() - t)
+    return f"{s}s" if s < 60 else f"{s // 60}m" if s < 3600 else \
+        f"{s // 3600}h{(s % 3600) // 60:02d}m"
+
+
+def status_line(p):
+    st = p.state()
+    n, status = st.get('batch', 0), st.get('status', 'idle')
+    waiting = len(p.tags(p.docdir))
+    parts = [f"vortex · {status}"]
+    if status in BUSY:
+        parts.append(f"batch {n} started {ago(st['started'])} ago")
+    elif st.get('last_applied'):
+        parts.append(f"batch {n} applied {ago(st['applied_at'])} ago "
+                     f"({st['last_applied']})")
+    parts.append(f"%CLAUDE comments waiting: {waiting}")
+    return '  │  '.join(parts)
+
+
+def cmd_status(args):
+    p = find_project(args.project)
+    print(status_line(p))
+    st = p.state()
+    if st.get('context'):
+        print("context of last batch: " + ', '.join(st['context']))
+
+
+def cmd_idle(args):
+    p = find_project(args.project)
+    try:
+        while True:
+            sys.stdout.write("\033[H\033[2J" + status_line(p) + "\n\n"
+                             "  \\vb or :VortexBatch   send comments to "
+                             "Claude\n"
+                             "  :VortexStatus         status and loaded "
+                             "context\n"
+                             "  Alt-Up / Alt-Down     move between panes\n")
+            sys.stdout.flush()
+            time.sleep(2)
+    except KeyboardInterrupt:
+        pass
+
+
+def cmd_log(args):
+    p = find_project(args.project)
+    print(git('log', f'-n{args.n}', '--format=%h %ad %an: %s',
+              '--date=format:%m-%d %H:%M', '--grep=^Vortex-Batch:',
+              cwd=p.repo))
+
+
+def main():
+    ap = argparse.ArgumentParser(prog='vortex', description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = ap.add_subparsers(dest='cmd', required=True)
+
+    def add(name, func, help_, project=True):
+        sp = sub.add_parser(name, help=help_)
+        if project:
+            sp.add_argument('--project', help='document directory')
+        sp.set_defaults(func=func)
+        return sp
+
+    add('init', cmd_init, 'set up .vortex/ next to a tex file',
+        project=False).add_argument('texfile')
+    add('start', cmd_start, 'open the vim + Claude + latexmk session',
+        project=False).add_argument('texfile')
+    add('batch', cmd_batch, 'send the %CLAUDE comments to Claude')
+    sp = add('check', cmd_check, "regenerate figures and compile Claude's copy")
+    sp.add_argument('--figures', action='store_true',
+                    help='regenerate figures even if their inputs did not change')
+    sp.add_argument('--no-figures', action='store_true',
+                    help='skip figure generation')
+    add('submit', cmd_submit, "merge Claude's work into the user's copy") \
+        .add_argument('-m', '--message', help='one-line summary')
+    add('abort', cmd_abort, 'cancel the current batch')
+    add('status', cmd_status, 'show the current state')
+    add('log', cmd_log, 'list vortex commits').add_argument(
+        '-n', type=int, default=30)
+    add('idle', cmd_idle, argparse.SUPPRESS)
+    add('_latexmk', cmd_latexmk, argparse.SUPPRESS)
+    args = ap.parse_args()
+    try:
+        rc = args.func(args)
+    except VortexError as e:
+        print(f"vortex: {e}", file=sys.stderr)
+        rc = 1
+    if isinstance(rc, int):
+        sys.exit(rc)
+
+
+if __name__ == '__main__':
+    main()

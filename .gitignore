@@ -1,0 +1,3 @@
+__pycache__/
+# the symlink to the document being worked on
+*.tex
