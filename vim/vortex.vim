@@ -189,16 +189,18 @@ endif
 " a command-line abbreviation that only expands when vb is the whole command)
 cnoreabbrev <expr> vb getcmdtype() ==# ':' && getcmdline() ==# 'vb' ? 'VortexBatch' : 'vb'
 
-" :NewOkularWindow (:nok) opens the PDF in an extra okular window, e.g. to keep
-" a figure in view while reading; it is independent of latexmk's viewer and
-" stays open when vim quits
+" :NewOkularWindow (:nok) opens the PDF in an extra viewer window (the viewer
+" set in .vortex/config, okular or another), e.g. to keep a figure in view
+" while reading; it is independent of latexmk's viewer and stays open when
+" vim quits
 function! s:NewOkular() abort
   let pdf = get(g:, 'vortex_pdf', expand('%:p:r') . '.pdf')
   if !filereadable(pdf)
     echohl ErrorMsg | echom 'vortex: ' . pdf . ' not found (not compiled yet?)' | echohl None
     return
   endif
-  call job_start(['okular', pdf], {'stoponexit': '', 'in_io': 'null',
+  call job_start(get(g:, 'vortex_viewer', ['xdg-open']) + [pdf],
+        \ {'stoponexit': '', 'in_io': 'null',
         \ 'out_io': 'null', 'err_io': 'null'})
 endfunction
 command! NewOkularWindow call <SID>NewOkular()

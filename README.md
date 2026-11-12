@@ -42,12 +42,13 @@ Every step is a git commit, so nothing is ever lost.
 
 - **vim** on the document, in the top two thirds;
 - **Claude Code** in the bottom third while a batch runs, or a status line when idle;
-- **latexmk -pvc** in a second tmux window, which opens **okular** and keeps the
-  PDF up to date as you save.
+- **latexmk -pvc** in a second tmux window, which opens your **PDF viewer**
+  (okular in the screenshots, configurable) and keeps the PDF up to date as
+  you save.
 
 `Ctrl-w w` (also `W`, `j`, `k`) moves between the vim windows and the Claude
 pane the same way it moves between vim windows. `:wq` closes everything and
-returns to the shell. `:nok` opens a second okular window, handy for keeping a
+returns to the shell. `:nok` opens a second viewer window, handy for keeping a
 figure in view while you read the text that discusses it.
 
 vortex runs its own tmux server (`tmux -L vortex`) and loads its vim plugin
@@ -182,7 +183,8 @@ Tested on Ubuntu 22.04 with:
 - tmux 3.2 (older versions untested)
 - git with worktree support (tested with 2.34)
 - latexmk and a TeX distribution
-- okular (opened by latexmk and by `:nok`)
+- a PDF viewer that reloads changed files by itself, e.g. okular, evince or
+  zathura (set `viewer` in `.vortex/config`)
 - [Claude Code](https://docs.claude.com/en/docs/claude-code) (tested with 2.1.322), logged in
 
 ## Install
@@ -214,7 +216,7 @@ In vim:
 | `:VortexStatus` | current state, and the context files loaded for the last batch |
 | `:VortexAbort` | cancel the running batch |
 | `:VortexLog` | list the vortex commits |
-| `:nok`, `:NewOkularWindow` | open an extra okular window on the PDF |
+| `:nok`, `:NewOkularWindow` | open an extra viewer window on the PDF |
 | `Ctrl-w w` / `W` / `j` / `k` | move between vim windows and the Claude pane |
 | `:wq` (last window) | close the whole session |
 
@@ -247,6 +249,8 @@ context = workflow writing latex
 claude_args =
 # Claude Code permission mode for batches (auto, acceptEdits, manual, ...)
 permission_mode = auto
+# PDF viewer for latexmk and :nok (empty: latexmk's own config, and xdg-open)
+viewer = okular
 # regenerate figures when Claude changes figure_inputs (empty: no figures)
 figures = make figures
 figure_inputs = code
@@ -285,7 +289,6 @@ context/*.md        context modules for Claude
 - Quitting vim during a batch stops Claude. Its unfinished work stays in the
   worktree until the next batch resets it.
 - Your global `~/.claude/CLAUDE.md` is still loaded by Claude Code.
-- okular is hard-coded as the PDF viewer.
 
 ## License
 

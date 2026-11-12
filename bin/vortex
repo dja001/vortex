@@ -61,6 +61,11 @@ claude_args =
 # Claude Code permission mode for batches: auto (a classifier approves safe
 # actions), acceptEdits (asks before most shell commands), manual, ...
 permission_mode = auto
+# PDF viewer, run with the PDF path appended: opened by latexmk -pvc and by
+# :nok (extra window). Pick one that reloads the PDF by itself, e.g. okular,
+# evince, zathura. Empty: latexmk uses its own configuration ($pdf_previewer)
+# and :nok uses xdg-open.
+viewer = xdg-open
 # command that regenerates the figures, run by `vortex check` in the document
 # directory only when Claude has changed something in figure_inputs;
 # leave empty if there are no generated figures
@@ -152,6 +157,7 @@ class Project:
         self.claude_args = shlex.split(sect.get('claude_args', ''))
         self.permission_mode = sect.get('permission_mode', '').strip() \
             or 'auto'
+        self.viewer = sect.get('viewer', 'xdg-open').strip()
         self.figures = sect.get('figures', '').strip()
         self.figure_inputs = sect.get('figure_inputs', '').split()
         top = git('rev-parse', '--show-toplevel', cwd=self.docdir)
@@ -447,6 +453,8 @@ def cmd_start(args):
             'vim', '--cmd', f"let g:vortex_dir = '{p.vdir}'",
             '--cmd', f"let g:vortex_bin = '{VORTEX_BIN}'",
             '--cmd', f"let g:vortex_pdf = '{p.docdir / Path(p.main).stem}.pdf'",
+            '--cmd', "let g:vortex_viewer = "
+                     + json.dumps(shlex.split(p.viewer) or ['xdg-open']),
             '-c', f"source {VIM_PLUGIN}", p.main])
         # quitting vim closes the whole session and returns to the terminal
         vim_cmd += '; exec ' + shlex.join(['tmux', '-L', TMUX_SOCKET,
@@ -481,10 +489,12 @@ def cmd_latexmk(args):
     p = find_project(args.project)
     os.chdir(p.docdir)
     cmd = ['latexmk', '-pdf', '-pvc', '-view=pdf',
-           '-interaction=nonstopmode',
-           '-e', "$pdf_previewer = q[okular --unique %S]; "
-                 "$pdf_update_method = 0;",
-           p.main]
+           '-interaction=nonstopmode']
+    if p.viewer:
+        # update method 0: the viewer reloads the PDF by itself
+        cmd += ['-e', f"$pdf_previewer = q[{p.viewer} %S]; "
+                      "$pdf_update_method = 0;"]
+    cmd.append(p.main)
     print('vortex:', shlex.join(cmd), flush=True)
     os.execvp(cmd[0], cmd)
 
