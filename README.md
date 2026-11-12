@@ -9,7 +9,7 @@ opens a tmux session (private server `tmux -L vortex`):
 - top: vim on the document; bottom third: Claude, or a status line when idle
 - window 2: `latexmk -pvc`, which opens okular and keeps the PDF current
 
-Write comments as `%CLAUDE <instruction>`, then `\vb` (or `:VortexBatch`).
+Write comments as `%CLAUDE <instruction>`, then `:vb` (short for `:VortexBatch`).
 Keep reading and editing while Claude works in its own git worktree. When it
 runs `vortex submit`, its commit is merged with your latest edits (saved
 automatically the next time vim is in normal mode), your branch is

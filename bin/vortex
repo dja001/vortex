@@ -413,6 +413,8 @@ def cmd_start(args):
                               str(p.docdir)])
         tmux('new-window', '-d', '-t', session, '-n', 'latexmk', '-c',
              p.docdir, latexmk)
+        # lets tmux.conf pass Ctrl-w through to vim and handle it elsewhere
+        tmux('set-option', '-p', '-t', vim_pane, '@vortex_vim', '1')
         st = p.state()
         if st.get('status') in BUSY:
             st['status'] = 'idle'   # a previous session died mid-batch
@@ -727,7 +729,7 @@ def cmd_idle(args):
     try:
         while True:
             sys.stdout.write("\033[H\033[2J" + status_line(p) + "\n\n"
-                             "  \\vb or :VortexBatch   send comments to "
+                             "  :vb                   send comments to "
                              "Claude\n"
                              "  :VortexStatus         status and loaded "
                              "context\n"

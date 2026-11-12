@@ -143,16 +143,56 @@ command! VortexStatus call <SID>Run('status')
 command! VortexAbort call <SID>Run('abort')
 command! VortexLog call <SID>Run('log -n 15')
 
-if empty(maparg('<Leader>vb', 'n'))
-  nnoremap <silent> <Leader>vb :VortexBatch<CR>
+" Ctrl-w w/W/j: at the edge of vim's windows, continue into the Claude pane
+" below (tmux/vortex.conf handles the way back).
+function! s:CtrlW(key) abort
+  let edge = v:count == 0 && (
+        \ (a:key ==# 'w' && winnr() == winnr('$'))
+        \ || (a:key ==# 'W' && winnr() == 1)
+        \ || (a:key ==# 'j' && winnr('j') == winnr()))
+  if edge
+    call system('tmux select-pane -D -t ' . shellescape($TMUX_PANE))
+  else
+    execute (v:count ? v:count : '') . 'wincmd ' . a:key
+  endif
+endfunction
+
+function! s:Arrived() abort
+  if empty($TMUX_PANE)
+    return
+  endif
+  let where = trim(system('tmux show-options -pqv -t ' . shellescape($TMUX_PANE) . ' @vortex_wrap'))
+  if where ==# ''
+    return
+  endif
+  call system('tmux set-option -pu -t ' . shellescape($TMUX_PANE) . ' @vortex_wrap')
+  execute (where ==# 'last' ? winnr('$') : 1) . 'wincmd w'
+endfunction
+
+if !empty($TMUX_PANE)
+  " vim only enables focus reporting for xterm-like terminals; tmux supports it
+  if empty(&t_fe)
+    let &t_fe = "\<Esc>[?1004h"
+    let &t_fd = "\<Esc>[?1004l"
+    silent! execute "set <FocusGained>=\<Esc>[I"
+    silent! execute "set <FocusLost>=\<Esc>[O"
+    call echoraw(&t_fe)
+  endif
+  nnoremap <silent> <C-w>w :<C-u>call <SID>CtrlW('w')<CR>
+  nnoremap <silent> <C-w><C-w> :<C-u>call <SID>CtrlW('w')<CR>
+  nnoremap <silent> <C-w>W :<C-u>call <SID>CtrlW('W')<CR>
+  nnoremap <silent> <C-w>j :<C-u>call <SID>CtrlW('j')<CR>
+  nnoremap <silent> <C-w><C-j> :<C-u>call <SID>CtrlW('j')<CR>
 endif
-if empty(maparg('<Leader>vs', 'n'))
-  nnoremap <silent> <Leader>vs :VortexStatus<CR>
-endif
+
+" :vb runs :VortexBatch (user commands must start with a capital, so this is
+" a command-line abbreviation that only expands when vb is the whole command)
+cnoreabbrev <expr> vb getcmdtype() ==# ':' && getcmdline() ==# 'vb' ? 'VortexBatch' : 'vb'
 
 let s:timer = timer_start(200, function('s:Poll'), {'repeat': -1})
 
 augroup vortex
   autocmd!
   autocmd VimLeave * call delete(s:pidfile)
+  autocmd FocusGained * call s:Arrived()
 augroup END
