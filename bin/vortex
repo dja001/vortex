@@ -410,6 +410,7 @@ def cmd_start(args):
         vim_cmd = shlex.join([
             'vim', '--cmd', f"let g:vortex_dir = '{p.vdir}'",
             '--cmd', f"let g:vortex_bin = '{VORTEX_BIN}'",
+            '--cmd', f"let g:vortex_pdf = '{p.docdir / Path(p.main).stem}.pdf'",
             '-c', f"source {VIM_PLUGIN}", p.main])
         # quitting vim closes the whole session and returns to the terminal
         vim_cmd += '; exec ' + shlex.join(['tmux', '-L', TMUX_SOCKET,

@@ -10,6 +10,8 @@ opens a tmux session (private server `tmux -L vortex`):
 - window 2: `latexmk -pvc`, which opens okular and keeps the PDF current
 
 Write comments as `%CLAUDE <instruction>`, then `:vb` (short for `:VortexBatch`).
+`:nok` (`:NewOkularWindow`) opens an extra okular window on the PDF, e.g. to
+keep a figure in view while reading.
 Keep reading and editing while Claude works in its own git worktree. When it
 runs `vortex submit`, its commit is merged with your latest edits (saved
 automatically the next time vim is in normal mode), your branch is
