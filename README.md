@@ -18,7 +18,9 @@ the merge. On conflicts Claude resolves them, or asks you in the bottom pane
 if your edits contradict its own. Alt-Up/Alt-Down move between panes.
 
 Every step is a commit tagged `Vortex-Batch: N` (`vortex log`, `:VortexLog`).
-Only the document files listed in `.vortex/config` are ever committed.
+Snapshots commit the tracked files you changed in the document directory
+(plus the `files` listed in `.vortex/config`, even if new); untracked files and
+anything outside that directory are never committed.
 
 ## Files
 

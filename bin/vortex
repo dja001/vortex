@@ -49,7 +49,8 @@ DEFAULT_CONFIG = """\
 [vortex]
 # main LaTeX file (relative to this document directory)
 main = {main}
-# files that make up the document: snapshotted, merged and scanned for %CLAUDE tags
+# document files: scanned for %CLAUDE tags, committed even when new (other
+# tracked files changed in this directory are committed too)
 files = {files}
 # context modules loaded for every batch, from {context_dir}/<name>.md
 # (project.md in this folder is always appended when it exists)
@@ -195,9 +196,15 @@ class Project:
         return b
 
     def snapshot(self, message, batch):
-        """Commit the user's document files (only those) if they changed."""
-        paths = self.repo_paths()
-        git('add', '--', *paths, cwd=self.repo)
+        """Commit the user's changes in the document directory, if any.
+
+        That is every tracked file changed under the document directory
+        (text, code, figures), plus the listed document files even if they
+        are new. Untracked files and anything outside stay uncommitted.
+        """
+        paths = [str(self.rel), *self.repo_paths()]
+        git('add', '-u', '--', str(self.rel), cwd=self.repo)
+        git('add', '--', *self.repo_paths(), cwd=self.repo)
         staged = run(['git', 'diff', '--cached', '--quiet', 'HEAD', '--',
                       *paths], cwd=self.repo, check=False)
         if staged.returncode:
@@ -675,7 +682,7 @@ def cmd_submit(args):
     st.update(status='idle', last_applied=head, applied_at=time.time())
     p.save_state(st)
     stat = git('diff', '--stat', st['base'], 'HEAD', '--',
-               *p.repo_paths(), cwd=p.repo)
+               str(p.rel), cwd=p.repo)
     left = p.tags(p.docdir)
     print(f"vortex submit: Applied batch {st['batch']} as {head}.")
     print(stat)
