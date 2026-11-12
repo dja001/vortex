@@ -30,6 +30,9 @@ only through `vortex submit`.
 5. Act on what submit prints:
    - **Applied**: you are done. Reply with one short line per comment saying
      what you changed, then your questions and anything else you noticed. Stop.
+     If the user then asks for more changes in the chat, make them, run
+     `vortex check` if needed, and run `vortex submit -m "<summary>"` again:
+     follow-ups are delivered as part of the same batch.
    - **CONFLICT**: the user edited the same lines while you worked. The files
      contain diff3 markers: `<<<<<<< HEAD` your version, `|||||||` the common
      ancestor, `=======`, `>>>>>>>` the user's version. Keep the user's edits

@@ -29,7 +29,8 @@ VORTEX_BIN = TOOL_DIR / 'bin' / 'vortex'
 CONTEXT_DIR = TOOL_DIR / 'context'
 VIM_PLUGIN = TOOL_DIR / 'vim' / 'vortex.vim'
 TMUX_CONF = TOOL_DIR / 'tmux' / 'vortex.conf'
-TMUX_SOCKET = 'vortex'
+# private tmux server; overridable so tests never touch a running session
+TMUX_SOCKET = os.environ.get('VORTEX_TMUX_SOCKET', 'vortex')
 
 TAG_RE = re.compile(r'%\s*CLAUDE\b(?!-Q)')
 CONFLICT_RE = re.compile(r'^(<<<<<<<|>>>>>>>)( |$)', re.M)
@@ -215,6 +216,36 @@ class Project:
     def merge_in_progress(self):
         return run(['git', 'rev-parse', '-q', '--verify', 'MERGE_HEAD'],
                    cwd=self.wt, check=False).returncode == 0
+
+    def preserve_worktree(self, batch):
+        """Keep any work in the worktree that never reached the user.
+
+        Returns the branch it was saved on, or None if there was nothing.
+        """
+        if not (self.wt / '.git').exists():
+            return None
+        if self.merge_in_progress():
+            git('merge', '--abort', cwd=self.wt, check=False)
+        if git('status', '--porcelain', cwd=self.wt):
+            git('add', '-A', cwd=self.wt)
+            git('commit', '-q', '-m', f"vortex: undelivered work from batch "
+                f"{batch}\n\nVortex-Batch: {batch}", cwd=self.wt,
+                env=CLAUDE_AUTHOR)
+        head = git('rev-parse', 'HEAD', cwd=self.wt)
+        if run(['git', 'merge-base', '--is-ancestor', head, 'HEAD'],
+               cwd=self.repo, check=False).returncode == 0:
+            return None
+        branch = f"vortex/undelivered-{batch}"
+        git('branch', '-f', branch, head, cwd=self.repo)
+        return branch
+
+    def followup_possible(self):
+        """True if the worktree still sits on work already in the user's branch."""
+        if not (self.wt / '.git').exists() or self.merge_in_progress():
+            return False
+        head = git('rev-parse', 'HEAD', cwd=self.wt)
+        return run(['git', 'merge-base', '--is-ancestor', head, 'HEAD'],
+                   cwd=self.repo, check=False).returncode == 0
 
     def reset_worktree(self, base):
         if (self.wt / '.git').exists():
@@ -486,6 +517,10 @@ def cmd_batch(args):
         raise VortexError("no %CLAUDE comments in the document")
     n = st.get('batch', 0) + 1
     base = p.snapshot(f"vortex: snapshot before batch {n}", n)
+    kept = p.preserve_worktree(n - 1)
+    if kept:
+        print(f"vortex: Claude's undelivered work from batch {n - 1} was "
+              f"saved on branch {kept}")
     p.reset_worktree(base)
     p.tmp.mkdir(parents=True, exist_ok=True)
     p.build.mkdir(parents=True, exist_ok=True)
@@ -634,12 +669,21 @@ def merge_user(p, st, user_commit):
 def cmd_submit(args):
     p = find_project(args.project)
     st = p.state()
+    followup = False
     if st.get('status') not in BUSY:
-        raise VortexError(f"no batch in progress (status: {st.get('status')})")
+        # follow-up requests made in the Claude pane after the batch was
+        # applied: deliver them as part of the same batch
+        if not (st.get('batch') and p.followup_possible()):
+            raise VortexError("no batch in progress (status: "
+                              f"{st.get('status')})")
+        followup = True
+        st.update(status='working', started=time.time())
+        p.save_state(st)
     if p.branch() != st['branch']:
         raise VortexError(f"the user switched from branch {st['branch']} to "
                           f"{p.branch()}; ask them what to do")
-    commit_claude_work(p, st, args.message)
+    commit_claude_work(p, st, args.message or (
+        f"vortex: batch {st['batch']} follow-up" if followup else None))
 
     vim = VimLink(p)
     locked = vim.request('lock')
