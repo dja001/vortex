@@ -13,11 +13,11 @@ editing while Claude works.**
 > you trust it with your work. Git keeps every version of your document (see
 > below), but there are no guarantees.
 
-> 📷 **Screenshot needed: `docs/screenshots/overview.png`.** The whole
-> terminal: vim in the top two thirds with a few `%CLAUDE` comments visible,
-> Claude working in the bottom third, and okular showing the PDF next to it.
+![okular showing the PDF on the left; on the right, vim with a %CLAUDE comment on top and Claude working on batch 4 below](docs/screenshots/overview.png)
 
-<!-- ![vortex: vim on top, Claude below, okular beside](docs/screenshots/overview.png) -->
+*okular shows the PDF (left). On the right, vim shows the source, with a
+`%CLAUDE` comment on line 1090, and Claude works on batch 4 in the bottom
+pane while you keep reading.*
 
 ## Why
 
@@ -69,8 +69,9 @@ Claude addresses each comment and deletes it. When a comment is unclear, it
 leaves it in place, adds a `%CLAUDE-Q <question>` line below it and asks you
 in its pane.
 
-> 📷 **Screenshot needed: `docs/screenshots/comments.png`.** vim showing a
-> paragraph with two or three `%CLAUDE` comments, just before typing `:vb`.
+![a paragraph in vim with three %CLAUDE comments at the end of lines](docs/screenshots/comments.png)
+
+*Three comments waiting for the next batch. `% CLAUDE` with a space works too.*
 
 ### Keep editing while Claude works
 
@@ -103,8 +104,10 @@ Claude resolves it: your edits are kept and Claude's intent is re-applied on
 top. If the two contradict each other (you both rewrote the same sentence
 differently), Claude asks you in its pane which version to keep.
 
-> 📷 **Screenshot needed: `docs/screenshots/conflict.png`.** The Claude pane
-> asking which version of a sentence to keep after a conflict.
+![Claude explaining a conflict between its renaming and the user's edit, and asking which name to keep](docs/screenshots/conflict.png)
+
+*Claude renamed a symbol on 11 lines while the author edited one of them.
+Claude explains the conflict and asks which name to keep.*
 
 ### Everything is a commit
 
@@ -116,8 +119,10 @@ Snapshots commit every tracked file you changed in the document directory,
 plus the document files listed in `.vortex/config`, even if new. Untracked
 files and anything outside the document directory are never committed.
 
-> 📷 **Screenshot needed: `docs/screenshots/log.png`.** The output of
-> `vortex log` (or `git log --graph`) after a few batches.
+![git log --graph showing snapshots, Claude's edits, the author's edits during a batch, and merge commits for batches 5 and 6](docs/screenshots/log.png)
+
+*`git log --graph` after two batches: a snapshot before each batch, Claude's
+edits, the author's edits made in the meantime, and the merge.*
 
 ### You control Claude's context
 
