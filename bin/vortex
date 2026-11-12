@@ -396,10 +396,14 @@ def cmd_start(args):
     session = 'vortex-' + re.sub(r'[^A-Za-z0-9_-]', '_', Path(p.main).stem)
     if not tmux_has(session):
         cols, lines = shutil.get_terminal_size((200, 60))
+        cols, lines = cols if cols > 0 else 200, lines if lines > 0 else 60
         vim_cmd = shlex.join([
             'vim', '--cmd', f"let g:vortex_dir = '{p.vdir}'",
             '--cmd', f"let g:vortex_bin = '{VORTEX_BIN}'",
             '-c', f"source {VIM_PLUGIN}", p.main])
+        # quitting vim closes the whole session and returns to the terminal
+        vim_cmd += '; exec ' + shlex.join(['tmux', '-L', TMUX_SOCKET,
+                                           'kill-session', '-t', session])
         tmux('new-session', '-d', '-s', session, '-n', 'edit', '-c',
              p.docdir, '-x', cols, '-y', lines, vim_cmd)
         vim_pane = tmux('display-message', '-p', '-t', f'{session}:edit',
