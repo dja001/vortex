@@ -282,6 +282,9 @@ class Project:
                     'Bash(git log:*)', 'Bash(git show:*)',
                     'Bash(git add:*)',
                     'Bash(grep:*)', 'Bash(sed -n:*)', 'Bash(wc:*)',
+                    # verifying references and DOIs (context/writing.md)
+                    'WebSearch', 'WebFetch(domain:doi.org)',
+                    'WebFetch(domain:api.crossref.org)',
                     f'Read({ctx})', f'Read(/{self.build}/**)',
                 ],
                 'deny': [
