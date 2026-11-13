@@ -16,11 +16,13 @@ let s:state = g:vortex_dir . '/state'
 let s:req = s:state . '/vim_request.json'
 let s:resp = s:state . '/vim_response.json'
 let s:pidfile = s:state . '/vim.pid'
+let s:wrapfile = s:state . '/vim_wrap'
 let s:locked = []
 let s:lock_time = 0
 
 call mkdir(s:state, 'p')
 call writefile([getpid()], s:pidfile)
+call delete(s:wrapfile)
 
 function! s:DocBuffers() abort
   return filter(getbufinfo({'buflisted': 1}),
@@ -84,6 +86,9 @@ function! s:Reload(req) abort
 endfunction
 
 function! s:Poll(timer) abort
+  if filereadable(s:wrapfile)
+    call s:Arrived()
+  endif
   if !empty(s:locked) && localtime() - s:lock_time > 60
     call s:Unlock()
     echohl WarningMsg | echom 'vortex: lock timed out, buffers unlocked' | echohl None
@@ -151,33 +156,25 @@ function! s:CtrlW(key) abort
         \ || (a:key ==# 'W' && winnr() == 1)
         \ || (a:key ==# 'j' && winnr('j') == winnr()))
   if edge
-    call system('tmux select-pane -D -t ' . shellescape($TMUX_PANE))
+    call job_start(['tmux', 'select-pane', '-D', '-t', $TMUX_PANE],
+          \ {'in_io': 'null', 'out_io': 'null', 'err_io': 'null'})
   else
     execute (v:count ? v:count : '') . 'wincmd ' . a:key
   endif
 endfunction
 
+" Back from the Claude pane with Ctrl-w w/W: tmux.conf writes first/last in
+" s:wrapfile, picked up by the poll timer. (Not focus events: vim would have to
+" enable them, and their escape codes can end up on the screen as ^[[O.)
 function! s:Arrived() abort
-  if empty($TMUX_PANE)
-    return
+  let where = get(readfile(s:wrapfile), 0, '')
+  call delete(s:wrapfile)
+  if getcmdwintype() ==# '' && mode() ==# 'n'
+    execute (where ==# 'last' ? winnr('$') : 1) . 'wincmd w'
   endif
-  let where = trim(system('tmux show-options -pqv -t ' . shellescape($TMUX_PANE) . ' @vortex_wrap'))
-  if where ==# ''
-    return
-  endif
-  call system('tmux set-option -pu -t ' . shellescape($TMUX_PANE) . ' @vortex_wrap')
-  execute (where ==# 'last' ? winnr('$') : 1) . 'wincmd w'
 endfunction
 
 if !empty($TMUX_PANE)
-  " vim only enables focus reporting for xterm-like terminals; tmux supports it
-  if empty(&t_fe)
-    let &t_fe = "\<Esc>[?1004h"
-    let &t_fd = "\<Esc>[?1004l"
-    silent! execute "set <FocusGained>=\<Esc>[I"
-    silent! execute "set <FocusLost>=\<Esc>[O"
-    call echoraw(&t_fe)
-  endif
   nnoremap <silent> <C-w>w :<C-u>call <SID>CtrlW('w')<CR>
   nnoremap <silent> <C-w><C-w> :<C-u>call <SID>CtrlW('w')<CR>
   nnoremap <silent> <C-w>W :<C-u>call <SID>CtrlW('W')<CR>
@@ -211,5 +208,4 @@ let s:timer = timer_start(200, function('s:Poll'), {'repeat': -1})
 augroup vortex
   autocmd!
   autocmd VimLeave * call delete(s:pidfile)
-  autocmd FocusGained * call s:Arrived()
 augroup END

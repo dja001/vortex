@@ -474,6 +474,9 @@ def cmd_start(args):
              p.docdir, latexmk)
         # lets tmux.conf pass Ctrl-w through to vim and handle it elsewhere
         tmux('set-option', '-p', '-t', vim_pane, '@vortex_vim', '1')
+        # where tmux.conf tells vim which window to land on after Ctrl-w
+        tmux('set-option', '-t', session, '@vortex_wrapfile',
+             str(p.state_dir / 'vim_wrap'))
         st = p.state()
         if st.get('status') in BUSY:
             st['status'] = 'idle'   # a previous session died mid-batch
