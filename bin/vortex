@@ -449,12 +449,20 @@ def cmd_start(args):
     if not tmux_has(session):
         cols, lines = shutil.get_terminal_size((200, 60))
         cols, lines = cols if cols > 0 else 200, lines if lines > 0 else 60
+        # vim settings go through a file, not vim's command line: latexmk -pvc
+        # looks for a running previewer by matching the viewer command and
+        # the PDF name against every process's command line, and would take
+        # vim for the viewer and never start it
+        p.state_dir.mkdir(parents=True, exist_ok=True)
+        vim_init = p.state_dir / 'vim_init.vim'
+        vim_init.write_text(''.join(
+            f"let g:vortex_{k} = {json.dumps(v)}\n" for k, v in [
+                ('dir', str(p.vdir)),
+                ('bin', str(VORTEX_BIN)),
+                ('pdf', f"{p.docdir / Path(p.main).stem}.pdf"),
+                ('viewer', shlex.split(p.viewer) or ['xdg-open'])]))
         vim_cmd = shlex.join([
-            'vim', '--cmd', f"let g:vortex_dir = '{p.vdir}'",
-            '--cmd', f"let g:vortex_bin = '{VORTEX_BIN}'",
-            '--cmd', f"let g:vortex_pdf = '{p.docdir / Path(p.main).stem}.pdf'",
-            '--cmd', "let g:vortex_viewer = "
-                     + json.dumps(shlex.split(p.viewer) or ['xdg-open']),
+            'vim', '--cmd', f"source {vim_init}",
             '-c', f"source {VIM_PLUGIN}", p.main])
         # quitting vim closes the whole session and returns to the terminal
         vim_cmd += '; exec ' + shlex.join(['tmux', '-L', TMUX_SOCKET,
