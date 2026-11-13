@@ -47,7 +47,8 @@ Every step is a git commit, so nothing is ever lost.
   you save.
 
 `Ctrl-w w` (also `W`, `j`, `k`) moves between the vim windows and the Claude
-pane the same way it moves between vim windows. `:wq` closes everything and
+pane the same way it moves between vim windows, and `Alt-Right` / `Alt-Left`
+switch to the latexmk window and back. `:wq` closes everything and
 returns to the shell. `:nok` opens a second viewer window, handy for keeping a
 figure in view while you read the text that discusses it.
 
@@ -218,6 +219,7 @@ In vim:
 | `:VortexLog` | list the vortex commits |
 | `:nok`, `:NewOkularWindow` | open an extra viewer window on the PDF |
 | `Ctrl-w w` / `W` / `j` / `k` | move between vim windows and the Claude pane |
+| `Alt-Right` / `Alt-Left` | switch to the latexmk window and back |
 | `:wq` (last window) | close the whole session |
 
 In the shell (`vortex -h`):
@@ -231,7 +233,8 @@ In the shell (`vortex -h`):
 | `vortex check` | regenerate figures if needed and compile Claude's copy (used by Claude) |
 | `vortex submit -m "..."` | merge Claude's work into your copy (used by Claude) |
 
-In the Claude pane, `Alt-Up` / `Alt-Down` also move between panes.
+In the Claude pane, `Ctrl-w w` returns to vim, and `Alt-Up` / `Alt-Down` also
+move between panes. `Alt-Right` / `Alt-Left` work everywhere in the session.
 
 ## Configuration
 

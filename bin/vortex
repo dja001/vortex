@@ -818,7 +818,13 @@ def cmd_idle(args):
                              "Claude\n"
                              "  :VortexStatus         status and loaded "
                              "context\n"
-                             "  Alt-Up / Alt-Down     move between panes\n")
+                             "  :nok                  open an extra PDF "
+                             "viewer\n"
+                             "  Ctrl-w w              move the cursor "
+                             "between vim and this pane\n"
+                             "  Alt-Up / Alt-Down     move between panes\n"
+                             "  Alt-Right / Alt-Left  switch to the latexmk "
+                             "window and back\n")
             sys.stdout.flush()
             time.sleep(2)
     except KeyboardInterrupt:
