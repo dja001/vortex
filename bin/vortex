@@ -32,7 +32,7 @@ TMUX_CONF = TOOL_DIR / 'tmux' / 'vortex.conf'
 # private tmux server; overridable so tests never touch a running session
 TMUX_SOCKET = os.environ.get('VORTEX_TMUX_SOCKET', 'vortex')
 
-TAG_RE = re.compile(r'%\s*CLAUDE\b(?!-Q)')
+TAG_RE = re.compile(r'%\s*CLAUDE\b(?!-Q)', re.IGNORECASE)
 CONFLICT_RE = re.compile(r'^(<<<<<<<|>>>>>>>)( |$)', re.M)
 CLAUDE_AUTHOR = {'GIT_AUTHOR_NAME': 'Claude (vortex)',
                  'GIT_AUTHOR_EMAIL': 'noreply@anthropic.com'}

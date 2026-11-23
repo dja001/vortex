@@ -73,7 +73,7 @@ in its pane.
 
 ![a paragraph in vim with three %CLAUDE comments at the end of lines](docs/screenshots/comments.png)
 
-*Three comments waiting for the next batch. `% CLAUDE` with a space works too.*
+*Three comments waiting for the next batch. `% CLAUDE` with a space works too, and so do `%Claude` and `%claude`.*
 
 ### Keep editing while Claude works
 
