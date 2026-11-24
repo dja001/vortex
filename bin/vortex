@@ -70,7 +70,7 @@ viewer = xdg-open
 # directory only when Claude has changed something in figure_inputs;
 # leave empty if there are no generated figures
 figures =
-# directories whose content the figures depend on
+# files and directories whose content the figures depend on
 figure_inputs =
 """
 
@@ -576,7 +576,9 @@ def cmd_batch(args):
 def inputs_signature(p, src):
     h = hashlib.sha1()
     for d in p.figure_inputs:
-        for f in sorted((src / d).rglob('*')):
+        root = src / d
+        files = [root] if root.is_file() else sorted(root.rglob('*'))
+        for f in files:
             if f.is_file() and '__pycache__' not in f.parts:
                 h.update(str(f.relative_to(src)).encode())
                 h.update(f.read_bytes())
