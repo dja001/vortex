@@ -141,6 +141,12 @@ function! s:Batch() abort
     return
   endtry
   call s:Run('batch')
+  " exit code 3: a batch is still in progress, e.g. Claude was stopped with
+  " Escape, which vortex cannot see
+  if v:shell_error == 3
+        \ && confirm('Abort it and send a new batch?', "&Yes\n&No", 2) == 1
+    call s:Run('batch --replace')
+  endif
 endfunction
 
 command! VortexBatch call <SID>Batch()

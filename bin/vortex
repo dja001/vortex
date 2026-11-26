@@ -534,13 +534,16 @@ def respawn_idle(p, st):
 def cmd_batch(args):
     p = find_project(args.project)
     st = p.state()
-    if st.get('status') in BUSY:
-        raise VortexError(f"batch {st['batch']} is still {st['status']} "
-                          "(:VortexAbort cancels it)")
-    branch = p.branch()
     tags = p.tags(p.docdir)
     if not tags:
         raise VortexError("no %CLAUDE comments in the document")
+    if st.get('status') in BUSY and not args.replace:
+        # Claude may have been stopped (Escape) without vortex knowing:
+        # exit code 3 lets :vb offer to replace the batch
+        print(f"vortex: batch {st['batch']} is still {st['status']} "
+              "(--replace starts a new one)", file=sys.stderr)
+        return 3
+    branch = p.branch()
     n = st.get('batch', 0) + 1
     base = p.snapshot(f"vortex: snapshot before batch {n}", n)
     kept = p.preserve_worktree(n - 1)
@@ -856,7 +859,9 @@ def main():
         project=False).add_argument('texfile')
     add('start', cmd_start, 'open the vim + Claude + latexmk session',
         project=False).add_argument('texfile')
-    add('batch', cmd_batch, 'send the %CLAUDE comments to Claude')
+    add('batch', cmd_batch, 'send the %CLAUDE comments to Claude') \
+        .add_argument('--replace', action='store_true',
+                      help='replace a batch still in progress')
     sp = add('check', cmd_check, "regenerate figures and compile Claude's copy")
     sp.add_argument('--figures', action='store_true',
                     help='regenerate figures even if their inputs did not change')

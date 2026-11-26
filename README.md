@@ -213,7 +213,7 @@ In vim:
 
 | Command | What it does |
 |---|---|
-| `:vb`, `:VortexBatch` | send the `%CLAUDE` comments to Claude |
+| `:vb`, `:VortexBatch` | send the `%CLAUDE` comments to Claude (if a batch is still in progress, e.g. you stopped Claude with Escape, it offers to replace it) |
 | `:VortexStatus` | current state, and the context files loaded for the last batch |
 | `:VortexAbort` | cancel the running batch |
 | `:VortexLog` | list the vortex commits |
@@ -228,7 +228,7 @@ In the shell (`vortex -h`):
 |---|---|
 | `vortex start file.tex` | open the session (creates `.vortex/` if needed) |
 | `vortex init file.tex` | only create `.vortex/` |
-| `vortex batch` | same as `:vb` |
+| `vortex batch` | same as `:vb` (`--replace` replaces a batch still in progress) |
 | `vortex status` / `log` / `abort` | as in vim |
 | `vortex check` | regenerate figures if needed and compile Claude's copy (used by Claude) |
 | `vortex submit -m "..."` | merge Claude's work into your copy (used by Claude) |
